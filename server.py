@@ -16,6 +16,102 @@ if not os.path.exists(DB_PATH) and os.path.exists(GZ_PATH):
 
 HAS_DB = os.path.exists(DB_PATH)
 
+# ===== 自动更新 =====
+VERSION_FILE = os.path.join(HERE, 'db_version.json')
+UPDATE_REPO = 'Ai-LaoHuang/金榜Agent'
+UPDATE_BRANCH = 'master'
+_encoded_repo = urllib.parse.quote(UPDATE_REPO, safe='/')
+UPDATE_VERSION_URL = f'https://raw.githubusercontent.com/{_encoded_repo}/{UPDATE_BRANCH}/db_version.json'
+UPDATE_DB_URL = f'https://raw.githubusercontent.com/{_encoded_repo}/{UPDATE_BRANCH}/admission_clean.db.gz'
+
+def _load_local_version():
+    if os.path.exists(VERSION_FILE):
+        try:
+            with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'version': '0', 'records': 0, 'updated': ''}
+
+UPDATE_STATE = {
+    'checking': False, 'downloading': False, 'progress': 0,
+    'message': '', 'updated': False, 'error': '',
+    'local_version': _load_local_version().get('version', '0'),
+    'remote_version': '', 'remote_records': 0,
+}
+
+import threading
+def _check_for_updates():
+    UPDATE_STATE['checking'] = True
+    UPDATE_STATE['message'] = '正在检查更新...'
+    try:
+        req = urllib.request.Request(UPDATE_VERSION_URL)
+        req.add_header('Cache-Control', 'no-cache')
+        resp = urllib.request.urlopen(req, timeout=15)
+        remote = json.loads(resp.read().decode('utf-8'))
+        UPDATE_STATE['remote_version'] = remote.get('version', '0')
+        UPDATE_STATE['remote_records'] = remote.get('records', 0)
+        local = _load_local_version()
+        if remote['version'] != local.get('version', '0'):
+            UPDATE_STATE['downloading'] = True
+            UPDATE_STATE['message'] = f"发现新数据 {remote['version']}（{remote.get('records','?')}条），正在下载..."
+            _download_update()
+        else:
+            UPDATE_STATE['message'] = '数据库已是最新'
+    except Exception as e:
+        UPDATE_STATE['error'] = str(e)
+        UPDATE_STATE['message'] = '更新检查失败（网络不可达）'
+    finally:
+        UPDATE_STATE['checking'] = False
+
+def _download_update():
+    try:
+        tmp_gz = GZ_PATH + '.tmp'
+        urllib.request.urlretrieve(UPDATE_DB_URL, tmp_gz, _update_progress)
+        # Atomic swap
+        if os.path.exists(GZ_PATH):
+            os.replace(GZ_PATH, GZ_PATH + '.bak')
+        os.replace(tmp_gz, GZ_PATH)
+        # Decompress new database
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+        with gzip.open(GZ_PATH, 'rb') as gz:
+            with open(DB_PATH, 'wb') as f:
+                shutil.copyfileobj(gz, f)
+        # Save version
+        remote_version = {'version': UPDATE_STATE['remote_version'],
+                          'records': UPDATE_STATE['remote_records'],
+                          'updated': __import__('datetime').datetime.now().isoformat()}
+        with open(VERSION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(remote_version, f, ensure_ascii=False)
+        # Reload coverage
+        global DB_COVERAGE, HAS_DB
+        HAS_DB = True
+        DB_COVERAGE = load_db_coverage()
+        UPDATE_STATE['updated'] = True
+        UPDATE_STATE['message'] = f"更新完成！{UPDATE_STATE['remote_records']}条记录已加载"
+        # Clean up backup
+        if os.path.exists(GZ_PATH + '.bak'):
+            os.remove(GZ_PATH + '.bak')
+    except Exception as e:
+        UPDATE_STATE['error'] = str(e)
+        UPDATE_STATE['message'] = f'下载失败: {e}'
+        # Restore backup
+        if os.path.exists(GZ_PATH + '.bak'):
+            os.replace(GZ_PATH + '.bak', GZ_PATH)
+
+def _update_progress(count, block_size, total_size):
+    if total_size > 0:
+        pct = min(int(count * block_size * 100 / total_size), 100)
+        UPDATE_STATE['progress'] = pct
+
+# Start update check in background (delayed 1s to not block startup)
+def _start_update_check():
+    t = threading.Thread(target=_check_for_updates, daemon=True)
+    t.start()
+
+threading.Timer(1.0, _start_update_check).start()
+
 def normalize_province(value):
     value = (value or '').strip().replace(' ', '')
     aliases = {'内蒙古自治区':'内蒙古','广西壮族自治区':'广西','宁夏回族自治区':'宁夏',
@@ -105,7 +201,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/ping':
-            return self._send({'ok':True,'db':HAS_DB})
+            return self._send({'ok':True,'db':HAS_DB,'updating':UPDATE_STATE.get('downloading',False)})
+        if self.path == '/update-status':
+            return self._send(dict(UPDATE_STATE))
         if self.path.startswith('/query'):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             rows = query_db(qs.get('province',[''])[0], qs.get('school',[''])[0], qs.get('major',[''])[0])
@@ -513,6 +611,9 @@ body{-webkit-font-smoothing:antialiased;background:radial-gradient(circle at 50%
         <div class="trust-row"><span>24.8 万条录取记录</span><span>14 省数据覆盖</span><span>数据与密钥保存在本机</span><span>由 Ai老黄 制作</span></div>
         <div id="debugStatus" style="margin-top:20px;font-size:12px;color:var(--t2);min-height:20px"></div>
       </div>
+      <div id="updateBar" style="max-width:1180px;margin:0 auto 12px;padding:8px 16px;border-radius:10px;background:rgba(91,148,248,.08);border:1px solid rgba(91,148,248,.15);font-size:11.5px;color:var(--t2);display:none;align-items:center;gap:8px;justify-content:center">
+        <span id="updateIcon"></span><span id="updateMsg"></span><span id="updateProgress"></span>
+      </div>
       <!-- Results grid (hidden initially) -->
       <div class="result-note" id="resultNote"></div>
       <div class="col-grid" id="colGrid" style="display:none">
@@ -881,7 +982,40 @@ try{
     if(s.query.rank)$('qRank').value=s.query.rank;
     if(s.query.keyword)$('qKeyword').value=s.query.keyword;
   }
+  // Auto-update polling
+  pollUpdate();
 }catch(e){console.warn('init error:',e.message);}
+
+// ==================== AUTO UPDATE ====================
+async function pollUpdate(){
+  var bar=$('updateBar'),icon=$('updateIcon'),msg=$('updateMsg'),prog=$('updateProgress');
+  try{
+    var r=await fetch('/update-status');
+    var d=await r.json();
+    if(d.checking||d.downloading||d.updated||d.error){
+      if(bar)bar.style.display='flex';
+      if(d.downloading){
+        if(icon)icon.textContent='⬇';
+        if(msg)msg.textContent=d.message;
+        if(prog)prog.textContent=d.progress+'%';
+        setTimeout(pollUpdate,1500);
+      }else if(d.checking){
+        if(icon)icon.textContent='⏳';
+        if(msg)msg.textContent=d.message;
+        setTimeout(pollUpdate,2000);
+      }else if(d.updated){
+        if(icon)icon.textContent='✅';
+        if(msg)msg.textContent=d.message;
+        if(prog)prog.textContent='';
+        setTimeout(function(){if(bar)bar.style.display='none';},5000);
+      }else if(d.error){
+        if(icon)icon.textContent='⚠';
+        if(msg)msg.textContent=d.message;
+        if(prog)prog.textContent='';
+      }
+    }
+  }catch(e){}
+}
 </script></body></html>
 '''
 
