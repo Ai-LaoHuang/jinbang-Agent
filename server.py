@@ -18,7 +18,7 @@ HAS_DB = os.path.exists(DB_PATH)
 
 # ===== 自动更新 =====
 VERSION_FILE = os.path.join(HERE, 'db_version.json')
-UPDATE_REPO = 'Ai-LaoHuang/金榜Agent'
+UPDATE_REPO = 'Ai-LaoHuang/jinbang-Agent'
 UPDATE_BRANCH = 'master'
 _encoded_repo = urllib.parse.quote(UPDATE_REPO, safe='/')
 UPDATE_VERSION_URL = f'https://raw.githubusercontent.com/{_encoded_repo}/{UPDATE_BRANCH}/db_version.json'
